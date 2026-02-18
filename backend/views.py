@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from flask import jsonify, request
-from sqlalchemy import select
+from sqlalchemy import select, or_
 
 from db import get_session
 from models import Item
@@ -15,6 +15,11 @@ def home():
 
 def health():
     return jsonify({"status": "ok"})
+
+
+def options_ok():
+    # Helps if something calls the view directly for OPTIONS
+    return ("", 204)
 
 
 def _parse_item_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -40,9 +45,44 @@ def _parse_item_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def list_items():
-    """GET /api/items - return all items."""
+    """
+    GET /api/items
+    Optional query params:
+      - q: search in title/creator/tags
+      - media_type: filter (book, dvd, vinyl, etc.)
+      - sort: created_at|title  (default created_at)
+      - order: asc|desc         (default desc)
+    """
+    q = (request.args.get("q") or "").strip()
+    media_type = (request.args.get("media_type") or "").strip().lower()
+    sort = (request.args.get("sort") or "created_at").strip().lower()
+    order = (request.args.get("order") or "desc").strip().lower()
+
+    stmt = select(Item)
+
+    if media_type:
+        stmt = stmt.where(Item.media_type == media_type)
+
+    if q:
+        like = f"%{q}%"
+        stmt = stmt.where(
+            or_(
+                Item.title.ilike(like),
+                Item.creator.ilike(like),
+                Item.tags.ilike(like),
+            )
+        )
+
+    # Sorting for clean list view behavior
+    if sort == "title":
+        sort_col = Item.title
+    else:
+        sort_col = Item.created_at
+
+    stmt = stmt.order_by(sort_col.asc() if order == "asc" else sort_col.desc())
+
     with get_session() as session:
-        items = session.execute(select(Item).order_by(Item.created_at.desc())).scalars().all()
+        items = session.execute(stmt).scalars().all()
         return jsonify([i.to_dict() for i in items])
 
 
@@ -57,12 +97,12 @@ def create_item():
     item = Item(**data)
     with get_session() as session:
         session.add(item)
-        session.flush()
+        session.flush()  # ensures item.id is assigned
         return jsonify(item.to_dict()), 201
 
 
 def get_item(item_id: int):
-    """GET /api/items/<id> - fetch one item."""
+    """GET /api/items/<id> - fetch one item (detail view)."""
     with get_session() as session:
         item = session.get(Item, item_id)
         if not item:
